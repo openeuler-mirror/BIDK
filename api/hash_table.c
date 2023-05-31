@@ -49,12 +49,12 @@ int mambo_ht_init(mambo_ht_t *ht, size_t initial_size, int index_shift, int fill
 }
 
 void __mambo_ht_lock(mambo_ht_t *ht) {
-  int ret = pthread_mutex_lock(&ht->lock);
+  int ret __attribute__((unused)) = pthread_mutex_lock(&ht->lock);
   assert(ret == 0);
 }
 
 void __mambo_ht_unlock(mambo_ht_t *ht) {
-  int ret = pthread_mutex_unlock(&ht->lock);
+  int ret __attribute__((unused)) = pthread_mutex_unlock(&ht->lock);
   assert(ret == 0);
 }
 
@@ -73,10 +73,11 @@ int __mambo_ht_resize(mambo_ht_t *ht) {
 
   for (size_t i = 0; i < prev_size; i++) {
     if (prev_entries[i].key != 0) {
-      int ret = mambo_ht_add_nolock(ht, prev_entries[i].key, prev_entries[i].value);
+      int ret __attribute__((unused)) = mambo_ht_add_nolock(ht, prev_entries[i].key, prev_entries[i].value);
       assert(ret == 0);
     }
   }
+  return 0;
 }
 
 int mambo_ht_add_nolock(mambo_ht_t *ht, uintptr_t key, uintptr_t value) {
@@ -84,7 +85,8 @@ int mambo_ht_add_nolock(mambo_ht_t *ht, uintptr_t key, uintptr_t value) {
 
   if (ht->entry_count >= ht->resize_threshold) {
     if (ht->allow_resize) {
-      __mambo_ht_resize(ht);
+      const int ret __attribute__((unused)) = __mambo_ht_resize(ht);
+      assert(ret == 0);
     } else {
       return -1;
     }

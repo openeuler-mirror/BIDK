@@ -3,6 +3,7 @@
       https://github.com/beehive-lab/mambo
 
   Copyright 2013-2016 Cosmin Gorgovan <cosmin at linux-geek dot org>
+  Copyright 2017-2020 The University of Manchester
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -34,149 +35,10 @@
   fprintf(stderr, "%s: Implement me\n", __PRETTY_FUNCTION__); \
   while(1);
 
-#ifdef __arm__
-void emit_thumb_push_cpsr(mambo_context *ctx, enum reg tmp_reg) {
-  uint16_t *write_p = ctx->code.write_p;
-
-  // MRS tmp_reg, CPSR
-  thumb_mrs32(&write_p, tmp_reg);
-  write_p += 2;
-
-  // PUSH {tmp_reg}
-  thumb_push_regs(&write_p, 1 << tmp_reg);
-
-  ctx->code.write_p = write_p;
-}
-
-void emit_arm_push_cpsr(mambo_context *ctx, enum reg tmp_reg) {
-  emit_arm_mrs(ctx, tmp_reg);
-  emit_arm_push(ctx, 1 << tmp_reg);
-}
-
-void emit_thumb_pop_cpsr(mambo_context *ctx, enum reg tmp_reg) {
-  uint16_t *write_p = ctx->code.write_p;
-
-  // POP {tmp_reg}
-  thumb_pop_regs(&write_p, 1 << tmp_reg);
-
-  // MSR tmp_reg, CPSR_fs
-  thumb_msr32(&write_p, tmp_reg, 3);
-  write_p += 2;
-
-  ctx->code.write_p = write_p;
-}
-
-void emit_arm_pop_cpsr(mambo_context *ctx, enum reg tmp_reg) {
-  emit_arm_pop(ctx, 1 << tmp_reg);
-  emit_arm_msr(ctx, tmp_reg, 3);
-}
-
-void emit_thumb_copy_to_reg_32bit(mambo_context *ctx, enum reg reg, uint32_t value) {
-  if (value <= 0xFFFF) {
-    copy_to_reg_16bit((uint16_t **)&ctx->code.write_p, reg, value);
-  } else {
-    copy_to_reg_32bit((uint16_t **)&ctx->code.write_p, reg, value);
-  }
-}
-
-void emit_arm_copy_to_reg_32bit(mambo_context *ctx, enum reg reg, uint32_t value) {
-  if (value <= 0xFFFF) {
-    arm_copy_to_reg_16bit((uint32_t **)&ctx->code.write_p, reg, value);
-  } else {
-    arm_copy_to_reg_32bit((uint32_t **)&ctx->code.write_p, reg, value);
-  }
-}
-
-void emit_thumb_b16_cond(void *write_p, void *target, mambo_cond cond) {
-  thumb_b16_cond_helper((uint16_t *)write_p, (uint32_t)target, cond);
-}
-
-void emit_thumb_push(mambo_context *ctx, uint32_t regs) {
-  ctx->code.plugin_pushed_reg_count += count_bits(regs);
-
-  uint16_t *write_p = ctx->code.write_p;
-  thumb_push_regs(&write_p, regs);
-  ctx->code.write_p = write_p;
-}
-
-void emit_arm_push(mambo_context *ctx, uint32_t regs) {
-  ctx->code.plugin_pushed_reg_count += count_bits(regs);
-
-  uint32_t *write_p = ctx->code.write_p;
-  arm_push_regs(regs);
-  ctx->code.write_p = write_p;
-}
-
-void emit_thumb_pop(mambo_context *ctx, uint32_t regs) {
-  ctx->code.plugin_pushed_reg_count -= count_bits(regs);
-  assert(ctx->code.plugin_pushed_reg_count >= 0);
-
-  uint16_t *write_p = ctx->code.write_p;
-  thumb_pop_regs(&write_p, regs);
-  ctx->code.write_p = write_p;
-}
-
-void emit_arm_pop(mambo_context *ctx, uint32_t regs) {
-  ctx->code.plugin_pushed_reg_count -= count_bits(regs);
-  assert(ctx->code.plugin_pushed_reg_count >= 0);
-
-  uint32_t *write_p = ctx->code.write_p;
-  arm_pop_regs(regs);
-  ctx->code.write_p = write_p;
-}
-
-void emit_arm_fcall(mambo_context *ctx, void *function_ptr) {
-  emit_arm_copy_to_reg_32bit(ctx, lr, (uint32_t)function_ptr);
-  emit_arm_blx(ctx, lr);
-}
-
-void emit_thumb_fcall(mambo_context *ctx, void *function_ptr) {
-  emit_thumb_copy_to_reg_32bit(ctx, lr, (uint32_t)function_ptr);
-  emit_thumb_blx16(ctx, lr);
-}
-
-static inline int emit_arm_add_sub_shift(mambo_context *ctx, int rd, int rn, int rm,
-                                         unsigned int shift_type, unsigned int shift) {
-  if (shift < 0 || shift > 31 || shift_type > ROR) {
-    return -1;
-  }
-
-  if (rm < 0) {
-    rm = -rm;
-    emit_arm_sub(ctx, REG_PROC, 0, rd, rn, rm | (shift_type << 5) | (shift << 7));
-  } else {
-    emit_arm_add(ctx, REG_PROC, 0, rd, rn, rm | (shift_type << 5) | (shift << 7));
-  }
-  return 0;
-}
-
-static inline int emit_arm_add_sub(mambo_context *ctx, int rd, int rn, int rm) {
-  return emit_arm_add_sub_shift(ctx, rd, rn, rm, LSL, 0);
-}
-
-static inline int emit_thumb_add_sub_shift(mambo_context *ctx, int rd, int rn, int rm,
-                                           unsigned int shift_type, unsigned int shift) {
-  if (shift < 0 || shift > 31 || shift_type > ROR) {
-    return -1;
-  }
-  if (rm < 0) {
-    rm = -rm;
-    emit_thumb_sub32(ctx, 0, rn, shift >> 2, rd, shift, shift_type, rm);
-  } else {
-    emit_thumb_add32(ctx, 0, rn, shift >> 2, rd, shift, shift_type, rm);
-  }
-  return 0;
-}
-
-static inline int emit_thumb_add_sub(mambo_context *ctx, int rd, int rn, int rm) {
-  return emit_thumb_add_sub_shift(ctx, rd, rn, rm, LSL, 0);
-}
-#endif // __arm__
-
 #ifdef __aarch64__
 void emit_a64_push(mambo_context *ctx, uint32_t regs) {
   int reg_no = count_bits(regs);
-  ctx->code.plugin_pushed_reg_count += reg_no;
+  ctx->code.plugin_pushed_reg_count += ((reg_no + 1) & ~1);
 
   uint32_t *write_p = ctx->code.write_p;
   uint32_t to_push[2];
@@ -199,7 +61,7 @@ void emit_a64_push(mambo_context *ctx, uint32_t regs) {
 }
 
 void emit_a64_pop(mambo_context *ctx, uint32_t regs) {
-  ctx->code.plugin_pushed_reg_count -= count_bits(regs);
+  ctx->code.plugin_pushed_reg_count -= ((count_bits(regs) + 1) & ~1);
   assert(ctx->code.plugin_pushed_reg_count >= 0);
 
   uint32_t *write_p = ctx->code.write_p;
@@ -283,6 +145,10 @@ void emit_set_reg(mambo_context *ctx, enum reg reg, uintptr_t value) {
 #endif
 }
 
+void emit_set_reg_ptr(mambo_context *ctx, enum reg reg, void *ptr) {
+  emit_set_reg(ctx, reg, (uintptr_t)ptr);
+}
+
 int __emit_branch_cond(inst_set inst_type, void *write, uintptr_t target, mambo_cond cond, bool link) {
   intptr_t diff = (target & (~THUMB)) - (uintptr_t)write;
   if (cond != AL && link) return -1;
@@ -316,7 +182,6 @@ int __emit_branch_cond(inst_set inst_type, void *write, uintptr_t target, mambo_
   if (cond == AL) {
     if (diff < -134217728 || diff > 134217724) return -1;
     a64_branch_helper(write, target, link);
-    //a64_b_helper(write, target);
   } else {
     if (diff < -1048576 || diff > 1048572) return -1;
     a64_b_cond_helper(write, target, cond);
@@ -685,4 +550,162 @@ int emit_indirect_branch_by_spc(mambo_context *ctx, enum reg reg) {
   }
 #endif
 }
+
+void emit_store_pair(mambo_context* ctx, int first, int second, int addr)
+{
+  uint32_t base_code = 0xa8810000;
+  uint32_t inst = base_code | (second << 10) | (addr << 5) | first;
+
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void emit_load_pair(mambo_context* ctx, int first, int second, int addr)
+{
+  uint32_t base_code = 0xa9ff0000;
+  uint32_t inst = base_code | (second << 10) | (addr << 5) | first;
+
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void emit_ldr(mambo_context* ctx, int reg, int addr)
+{
+  uint32_t base_code = 0xf9400000;
+  uint32_t inst = base_code | (addr << 5) | reg;
+
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void emit_str(mambo_context* ctx, int reg, int addr)
+{
+  uint32_t base_code = 0xf9000000;
+  uint32_t inst = base_code | (addr << 5) | reg;
+
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void emit_and(mambo_context* ctx, int rd, int rn, int rm)
+{
+  uint32_t base_code = 0x8a000000;
+  uint32_t inst = base_code | (rm << 16) | (rn << 5) | rd;
+
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void emit_str_imm_unsigned_offset(mambo_context* ctx, int rt, int rn, int offset)
+{
+  const uint32_t base_code = 0xf9000000;
+  offset /= 8;
+  offset &= (1 << 12) - 1;
+  uint32_t inst = base_code | (offset << 10) | (rn << 5) | rt;
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void emit_ldr_imm_unsigned_offset(mambo_context* ctx, int rt, int rn, int offset)
+{
+  const uint32_t base_code = 0xf9400000;
+  offset /= 8;
+  offset &= (1 << 12) - 1;
+
+  uint32_t inst = base_code | (offset << 10) | (rn << 5) | rt;
+
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void emit_stp_imm_signed(mambo_context* ctx, int rt, int rt2, int rn, int offset)
+{
+  const uint32_t base_code = 0xa9000000;
+  offset /= 8;
+  offset &= (1 << 7) - 1;
+
+  uint32_t inst = base_code | (offset << 15) | (rt2 << 10) | (rn << 5) | rt;
+
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void emit_ldp_imm_signed(mambo_context* ctx, int rt, int rt2, int rn, int offset)
+{
+  const uint32_t base_code = 0xa8c00000;
+  offset /= 8;
+  offset &= (1 << 7) - 1;
+
+  uint32_t inst = base_code | (offset << 15) | (rt2 << 10) | (rn << 5) | rt;
+
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void emit_and_imm(mambo_context* ctx, int rd, int rn, uint32_t imm)
+{
+  uint32_t base_code = 0x92000000;
+  uint32_t inst = base_code | imm | (rn << 5) | rd;
+
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void emit_tbz(mambo_context* ctx, int rt, int bit, int offset)
+{
+  uint32_t base_code = 0x36000000;
+  uint32_t b31 = (bit & 32) >> 5;
+  bit &= ~32;
+  uint32_t imm = offset >> 2;
+
+  uint32_t inst = (b31 << 31) | base_code | (bit << 19) | (imm << 5) | rt;
+
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  *wp = inst;
+  wp++;
+  ctx->code.write_p = wp;
+}
+
+void patch_tbz(void* pc, int rt, int bit, int offset)
+{
+  uint32_t base_code = 0x36000000;
+  uint32_t b31 = (bit & 32) >> 5;
+  bit &= ~32;
+  uint32_t imm = offset >> 2;
+
+  uint32_t inst = (b31 << 31) | base_code | (bit << 19) | (imm << 5) | rt;
+
+  uint32_t* wp = (uint32_t*)pc;
+  *wp = inst;
+}
+
+void* reserve_inst(mambo_context* ctx)
+{
+  uint32_t* wp = (uint32_t*)ctx->code.write_p;
+  wp;
+  ctx->code.write_p = wp + 1;
+
+  return wp;
+}
+
 #endif

@@ -65,7 +65,7 @@ void install_system_sig_handlers() {
   act.sa_sigaction = signal_trampoline;
   sigemptyset(&act.sa_mask);
   act.sa_flags = SA_SIGINFO;
-  int ret = sigaction(UNLINK_SIGNAL, &act, NULL);
+  int ret __attribute__((unused)) = sigaction(UNLINK_SIGNAL, &act, NULL);
   assert(ret == 0);
 }
 
@@ -76,7 +76,7 @@ int deliver_signals(uintptr_t spc, self_signal *s) {
     thread_abort(current_thread);
   }
 
-  int ret = syscall(__NR_rt_sigprocmask, 0, NULL, &sigmask, sizeof(sigmask));
+  int ret __attribute__((unused)) = syscall(__NR_rt_sigprocmask, 0, NULL, &sigmask, sizeof(sigmask));
   assert (ret == 0);
 
   for (int i = 0; i < _NSIG; i++) {
@@ -114,7 +114,7 @@ bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p) {
   int br_inst_type, trap_inst_type;
   inst_decoder decoder;
   void *write_p = *o_write_p;
-  bool is_thumb = false;
+  bool __attribute__((unused)) is_thumb = false;
 #ifdef __arm__
   if (bb_meta->exit_branch_type == uncond_reg_thumb) {
     is_thumb = true;
@@ -145,40 +145,52 @@ bool unlink_indirect_branch(dbm_code_cache_meta *bb_meta, void **o_write_p) {
   return true;
 }
 
-bool unlink_direct_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int fragment_id, uintptr_t pc) {
-  int offset = 0;
-  bool is_thumb = false;
-  void *write_p = *o_write_p;
-
+int get_direct_branch_exit_trap_sz(dbm_code_cache_meta *bb_meta, int fragment_id) {
+  int sz;
   switch(bb_meta->exit_branch_type) {
 #ifdef __arm__
     case cond_imm_thumb:
     case cbz_thumb:
-      offset = (bb_meta->branch_cache_status & BOTH_LINKED) ? 10 : 6;
-      is_thumb = true;
+      sz = (bb_meta->branch_cache_status & BOTH_LINKED) ? 10 : 6;
       break;
     case cond_imm_arm:
-      offset = (bb_meta->branch_cache_status & BOTH_LINKED) ? 8 : 4;
+      sz = (bb_meta->branch_cache_status & BOTH_LINKED) ? 8 : 4;
       break;
 #elif __aarch64__
     case uncond_imm_a64:
-      offset = 4;
+      sz = 4;
       break;
     case cond_imm_a64:
     case cbz_a64:
     case tbz_a64:
-      offset = (bb_meta->branch_cache_status & BOTH_LINKED) ? 12 : 8;
+      if (fragment_id >= CODE_CACHE_SIZE) {
+        // a single branch is inserted for a conditional exit in a trace
+        // however a second branch may follow for an early exit to an existing trace
+        sz = 8;
+      } else {
+        sz = (bb_meta->branch_cache_status & BOTH_LINKED) ? 12 : 8;
+      }
       break;
 #endif
     default:
       while(1);
   }
+  return sz;
+}
+
+bool unlink_direct_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int fragment_id, uintptr_t pc) {
+  int offset = 0;
+  bool __attribute__((unused)) is_thumb = false;
+  void *write_p = *o_write_p;
+
+  offset = get_direct_branch_exit_trap_sz(bb_meta, fragment_id);
 
   if (pc < ((uintptr_t)bb_meta->exit_branch_addr + offset)) {
     if (bb_meta->branch_cache_status != 0) {
-    inst_decoder decoder;
+      inst_decoder decoder;
 
 #ifdef __arm__
+      is_thumb = (bb_meta->exit_branch_type == cond_imm_thumb) || (bb_meta->exit_branch_type == cbz_thumb);
       if (is_thumb) {
         decoder = (inst_decoder)thumb_decode;
       } else {
@@ -191,6 +203,7 @@ bool unlink_direct_branch(dbm_code_cache_meta *bb_meta, void **o_write_p, int fr
       if (inst == TRAP_INST_TYPE) {
         return false;
       }
+      memcpy(&bb_meta->saved_exit, write_p, offset);
       for (int i = 0; i < offset; i += inst_size(TRAP_INST_TYPE, is_thumb)) {
         write_trap(SIGNAL_TRAP_DB);
       }
@@ -235,6 +248,15 @@ void unlink_fragment(int fragment_id, uintptr_t pc) {
   }
 #else
   bb_meta = &current_thread->code_cache_meta[fragment_id];
+#endif
+
+#ifdef __aarch64__
+  // we don't try to unlink trace exits, we unlink the fragment they jump to
+  if (bb_meta->exit_branch_type == trace_exit) {
+    fragment_id = addr_to_fragment_id(current_thread, bb_meta->branch_taken_addr);
+    bb_meta = &current_thread->code_cache_meta[fragment_id];
+    pc = bb_meta->tpc;
+  }
 #endif
 
   void *write_p = bb_meta->exit_branch_addr;
@@ -412,48 +434,12 @@ void restore_exit(dbm_thread *thread_data, int fragment_id, void **o_write_p, bo
 #elif __aarch64__
 void restore_exit(dbm_thread *thread_data, int fragment_id, void **o_write_p) {
 #endif
-  uintptr_t target;
-  uintptr_t other_target;
   void *write_p = *o_write_p;
   dbm_code_cache_meta *bb_meta = &thread_data->code_cache_meta[fragment_id];
-  int cond = bb_meta->branch_condition;
 
-#ifdef __arm__
-  if (bb_meta->branch_cache_status & FALLTHROUGH_LINKED) {
-#elif __aarch64__
-  if (bb_meta->branch_cache_status & BRANCH_LINKED) {
-#endif
-    cond = invert_cond(cond);
-  }
-  insert_cond_exit_branch(bb_meta, &write_p, cond);
-
-  if (bb_meta->branch_cache_status & BRANCH_LINKED) {
-    target = bb_meta->branch_taken_addr;
-    other_target = bb_meta->branch_skipped_addr;
-  } else {
-    assert((bb_meta->branch_cache_status & 3) == FALLTHROUGH_LINKED);
-    target = bb_meta->branch_skipped_addr;
-    other_target = bb_meta->branch_taken_addr;
-  }
-  target = cc_lookup(thread_data, target);
-  assert(target != UINT_MAX);
-  direct_branch(write_p, target, cond);
-  write_p += 4;
-
-  if ((bb_meta->branch_cache_status & BOTH_LINKED) &&
-#ifdef __arm__
-      bb_meta->exit_branch_type != uncond_imm_thumb &&
-      bb_meta->exit_branch_type != uncond_b_to_bl_thumb &&
-      bb_meta->exit_branch_type != uncond_imm_arm
-#elif __aarch64__
-      bb_meta->exit_branch_type != uncond_imm_a64
-#endif
-  ) {
-    target = cc_lookup(thread_data, other_target);
-    assert(target != UINT_MAX);
-    direct_branch(write_p, target, AL);
-    write_p += 4;
-  }
+  int restore_sz = get_direct_branch_exit_trap_sz(bb_meta, fragment_id);
+  memcpy(write_p, &bb_meta->saved_exit, restore_sz);
+  write_p += restore_sz;
 
   *o_write_p = write_p;
 }
@@ -547,7 +533,7 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
   }
 
   if (deliver_now) {
-    handler = lookup_or_scan(current_thread, global_data.signal_handlers[i], NULL);
+    handler = lookup_or_scan(current_thread, global_data.signal_handlers[i]);
     return handler;
   }
 
@@ -661,7 +647,7 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
       struct sigaction act;
       act.sa_sigaction = (void *)handler;
       sigemptyset(&act.sa_mask);
-      int ret = sigaction(i, &act, NULL);
+      int ret __attribute__((unused)) = sigaction(i, &act, NULL);
       assert(ret == 0);
 
       // sigreturn so the same signal is raised again without an installed signal handler
@@ -669,7 +655,7 @@ uintptr_t signal_dispatcher(int i, siginfo_t *info, void *context) {
     }
 
     cont->pc_field = 0;
-    handler = lookup_or_scan(current_thread, handler, NULL);
+    handler = lookup_or_scan(current_thread, handler);
     return handler;
   }
 

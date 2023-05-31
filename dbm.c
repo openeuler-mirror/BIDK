@@ -97,45 +97,54 @@ uintptr_t cc_lookup(dbm_thread *thread_data, uintptr_t target) {
   return adjust_cc_entry(addr);
 }
 
-uintptr_t lookup_or_scan(dbm_thread *thread_data, uintptr_t target, bool *cached) {
-  uintptr_t block_address;
-  bool from_cache = true;
-  uintptr_t basic_block;
-  
+static inline uintptr_t _lookup_or_scan(dbm_thread * const thread_data,
+                                 const uintptr_t target,
+                                 bool * const cached) {
   debug("Thread_data: %p\n", thread_data);
-  
-  block_address = cc_lookup(thread_data, target);
 
-  if (block_address == UINT_MAX) {
-    from_cache = false;
-    block_address = scan(thread_data, (uint16_t *)target, ALLOCATE_BB);
-  } else {
-    basic_block = ((uintptr_t)block_address - (uintptr_t)(thread_data->code_cache)) >> 8;
-    if (thread_data->code_cache_meta[basic_block].exit_branch_type == stub) {
-      block_address = scan(thread_data, (uint16_t *)target, basic_block);
+  uintptr_t block_address = cc_lookup(thread_data, target);
+  int basic_block = ALLOCATE_BB;
+
+  if (block_address != UINT_MAX) {
+    /* Only basic blocks can be stubs
+       use addr_to_bb_id over addr_to_fragment_id as it's a O(1) lookup vs O(log n) */
+    if (!is_trace(thread_data, block_address)) {
+      basic_block = addr_to_bb_id(thread_data, block_address);
+      if (thread_data->code_cache_meta[basic_block].exit_branch_type == stub) {
+        block_address = UINT_MAX;
+      }
     }
   }
-  
+
   if (cached != NULL) {
-    *cached = from_cache;
+    *cached = (block_address != UINT_MAX);
   }
-  
-  return block_address;
+
+  if (block_address != UINT_MAX) {
+    return block_address;
+  }
+
+  return scan(thread_data, (uint16_t *)target, basic_block);
+}
+
+uintptr_t lookup_or_scan(dbm_thread * const thread_data, const uintptr_t target) {
+    return lookup_or_scan_with_cached(thread_data, target, NULL);
+}
+
+inline uintptr_t lookup_or_scan_with_cached(dbm_thread * const thread_data,
+                                            const uintptr_t target,
+                                            bool *const cached) {
+    return _lookup_or_scan(thread_data, target, cached);
 }
 
 int allocate_bb(dbm_thread *thread_data) {
-  unsigned int basic_block;
-  bool flushed = false;
-
   // Reserve CODE_CACHE_OVERP basic blocks to be able to scan large blocks
   if(thread_data->free_block >= (CODE_CACHE_SIZE - CODE_CACHE_OVERP)) {
     fprintf(stderr, "code cache full, flushing it\n");
     flush_code_cache(thread_data);
-    flushed = true;
   }
-  
-  basic_block = thread_data->free_block++;
-  return basic_block;
+
+  return thread_data->free_block++;
 }
 
 /* Stub BBs only contain a call to the dispatcher
@@ -150,7 +159,7 @@ uintptr_t stub_bb(dbm_thread *thread_data, uintptr_t target) {
   basic_block = allocate_bb(thread_data);
   block_address = (uintptr_t)&thread_data->code_cache->blocks[basic_block];
   
-  debug("Stub BB: 0x%x\n", block_address + thumb);
+  debug("Stub BB: 0x%" PRIxPTR "\n", block_address + thumb);
   
   thread_data->code_cache_meta[basic_block].exit_branch_type = stub;
   if (!hash_add(&thread_data->entry_address, target, block_address + thumb)) {
@@ -175,7 +184,7 @@ uintptr_t stub_bb(dbm_thread *thread_data, uintptr_t target) {
 uintptr_t lookup_or_stub(dbm_thread *thread_data, uintptr_t target) {
   uintptr_t block_address;
   
-  debug("Stub(0x%x)\n", target);
+  debug("Stub (0x%" PRIxPTR ")\n", target);
   debug("Thread_data: %p\n", thread_data);
   
   block_address = cc_lookup(thread_data, target);
@@ -205,7 +214,6 @@ uintptr_t scan(dbm_thread *thread_data, uint16_t *address, int basic_block) {
   block_address = (uintptr_t)&thread_data->code_cache->blocks[basic_block];
   thread_data->code_cache_meta[basic_block].source_addr = address;
   thread_data->code_cache_meta[basic_block].tpc = block_address;
-  //fprintf(stderr, "scan(%p): 0x%x (bb %d)\n", address, block_address, basic_block);
 
   // Add entry into the code cache hash table
   // It must be added before scan_ is called, otherwise a call for scan
@@ -223,26 +231,14 @@ uintptr_t scan(dbm_thread *thread_data, uint16_t *address, int basic_block) {
 #ifdef __arm__
   if (thumb) {
     debug("scan address: %p\n", address);
-    block_size = scan_thumb(thread_data, (uint16_t *)((uint32_t)address & 0xFFFFFFFE), basic_block, mambo_bb, NULL);
+    block_size = scan_t32(thread_data, (uint16_t *)((uint32_t)address & 0xFFFFFFFE), basic_block, mambo_bb, NULL);
   } else {
-    block_size = scan_arm(thread_data, (uint32_t *)address, basic_block, mambo_bb, NULL);
+    block_size = scan_a32(thread_data, (uint32_t *)address, basic_block, mambo_bb, NULL);
   }
 #endif
 #ifdef __aarch64__
   block_size = scan_a64(thread_data, (uint32_t *)address, basic_block, mambo_bb, NULL);
 #endif
-
-#ifdef __arm__
-  inst_set inst_type = thumb ? THUMB_INST : ARM_INST;
-#elif __aarch64__
-  inst_set inst_type = A64_INST;
-#endif
-  bool stop = true;
-  mambo_deliver_callbacks_code(POST_BB_C, thread_data, mambo_bb, basic_block, inst_type,
-                               -1, -1, address, (void *)(block_address & (~THUMB)), NULL, &stop);
-  mambo_deliver_callbacks_code(POST_FRAGMENT_C, thread_data, mambo_bb, basic_block, inst_type,
-                               -1, -1, address, (void *)(block_address & (~THUMB)), NULL, &stop);
-  assert(stop == true);
 
   // Flush modified instructions from caches
   // End address is exclusive
@@ -366,6 +362,11 @@ void thread_abort(dbm_thread *thread_data) {
 
 bool allocate_thread_data(dbm_thread **thread_data) {
   dbm_thread *data = mmap(NULL, sizeof(dbm_thread), PROT_READ | PROT_WRITE, METADATA_MMAP_OPTS, -1, 0);
+  assert(data != MAP_FAILED);
+
+  data->link_stack = mmap(NULL, LINK_STACK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  assert(data->link_stack != MAP_FAILED);
+
   if (data != MAP_FAILED) {
     *thread_data = data;
     return true;
@@ -374,6 +375,7 @@ bool allocate_thread_data(dbm_thread **thread_data) {
 }
 
 int free_thread_data(dbm_thread *thread_data) {
+  munmap(thread_data->link_stack, LINK_STACK_SIZE);
   if (munmap(thread_data->code_cache, CC_SZ_ROUND(sizeof(dbm_code_cache))) != 0) {
     fprintf(stderr, "Error freeing code cache on exit()\n");
     while(1);
@@ -441,7 +443,7 @@ void init_thread(dbm_thread *thread_data) {
 
   thread_data->status = THREAD_RUNNING;
                         
-  debug("Syscall wrapper addr: 0x%x\n", thread_data->syscall_wrapper_addr);
+  debug("Syscall wrapper addr: 0x%" PRIxPTR "\n", thread_data->syscall_wrapper_addr);
 }
 
 void free_all_other_threads(dbm_thread *thread_data) {
@@ -460,7 +462,7 @@ void free_all_other_threads(dbm_thread *thread_data) {
 void reset_process(dbm_thread *thread_data) {
   thread_data->tid = syscall(__NR_gettid);
 
-  int ret = pthread_mutex_init(&global_data.thread_list_mutex, NULL);
+  int ret __attribute__((unused)) = pthread_mutex_init(&global_data.thread_list_mutex, NULL);
   assert(ret == 0);
 
   current_thread = thread_data;
@@ -480,27 +482,34 @@ void reset_process(dbm_thread *thread_data) {
   mambo_deliver_callbacks(PRE_THREAD_C, thread_data);
 }
 
-bool is_bb(dbm_thread *thread_data, uintptr_t addr) {
-  uintptr_t min = (uintptr_t)thread_data->code_cache->blocks;
-  uintptr_t max = (uintptr_t)thread_data->code_cache->traces;
+bool is_bb(dbm_thread * const thread_data, const uintptr_t addr) {
+  const uintptr_t cc_start = (uintptr_t)thread_data->code_cache->blocks;
+  const uintptr_t bbc_end = (uintptr_t)thread_data->code_cache->traces;
 
-  return addr >= min && addr < max;
+  return (addr >= cc_start) && (addr < bbc_end);
 }
 
-int addr_to_bb_id(dbm_thread *thread_data, uintptr_t addr) {
-  uintptr_t min = (uintptr_t)thread_data->code_cache->blocks;
-  uintptr_t max = (uintptr_t)thread_data->code_cache->traces;
+bool is_trace(dbm_thread * const thread_data, const uintptr_t addr) {
+  const uintptr_t bbc_end = (uintptr_t)thread_data->code_cache->traces;
+  const uintptr_t cc_end = bbc_end + TRACE_CACHE_SIZE;
 
-  if (addr < min || addr > max) {
+  return (addr >= bbc_end) && (addr < cc_end);
+}
+
+int addr_to_bb_id(dbm_thread * const thread_data, const uintptr_t addr) {
+  const uintptr_t cc_start = (uintptr_t)thread_data->code_cache->blocks;
+  const uintptr_t bbc_end = (uintptr_t)thread_data->code_cache->traces;
+
+  if (addr < cc_start || addr > bbc_end) {
     return -1;
   }
 
-  return (addr - (uintptr_t)thread_data->code_cache->blocks) / sizeof(dbm_block);
+  return (addr - cc_start) / sizeof(dbm_block);
 }
 
-int addr_to_fragment_id(dbm_thread *thread_data, uintptr_t addr) {
-  uintptr_t start = (uintptr_t )thread_data->code_cache->blocks;
-  assert(addr >= start && addr < (start + MAX_BRANCH_RANGE));
+int addr_to_fragment_id(dbm_thread * const thread_data, const uintptr_t addr) {
+  const uintptr_t cc_start __attribute__((unused)) = (uintptr_t)thread_data->code_cache->blocks;
+  assert(addr >= cc_start && addr < (cc_start + MAX_BRANCH_RANGE));
 
   int id = addr_to_bb_id(thread_data, addr);
   if (id >= 0) {
@@ -539,7 +548,7 @@ int addr_to_fragment_id(dbm_thread *thread_data, uintptr_t addr) {
 void record_cc_link(dbm_thread *thread_data, uintptr_t linked_from, uintptr_t linked_to_addr) {
   int linked_to = addr_to_bb_id(thread_data, linked_to_addr);
 
-  debug("Linked 0x%x (%d) from 0x%x\n", linked_to_addr, linked_to, linked_from);
+  debug("Linked 0x%" PRIxPTR " (%d) from 0x%" PRIxPTR "\n", linked_to_addr, linked_to, linked_from);
 
   if (linked_to < 0) return;
 
@@ -555,7 +564,7 @@ void notify_vm_op(vm_op_t op, uintptr_t addr, size_t size, int prot, int flags, 
   switch(op) {
     case VM_MAP: {
       if (prot & PROT_EXEC) {
-        int ret = interval_map_add(&global_data.exec_allocs, addr, addr + size, fd);
+        int ret __attribute__((unused)) = interval_map_add(&global_data.exec_allocs, addr, addr + size, fd);
         assert(ret == 0);
       }
 #ifdef PLUGINS_NEW
@@ -564,7 +573,7 @@ void notify_vm_op(vm_op_t op, uintptr_t addr, size_t size, int prot, int flags, 
         if (elf != NULL) {
           function_watch_parse_elf(&global_data.watched_functions, elf, (void *)addr);
         }
-        int ret = elf_end(elf);
+        int ret __attribute__((unused)) = elf_end(elf);
         assert(ret == 0);
       }
 #endif // PLUGINS_NEW
@@ -584,7 +593,7 @@ void notify_vm_op(vm_op_t op, uintptr_t addr, size_t size, int prot, int flags, 
          Fortunately, the fd is only used for symbol resolution and the GNU linker marks
          file mappings with PROT_EXEC from the beginning, so it shouldn't really be an issue */
       if (prot & PROT_EXEC) {
-        int ret = interval_map_add(&global_data.exec_allocs, addr, addr + size, fd);
+        int ret __attribute__((unused)) = interval_map_add(&global_data.exec_allocs, addr, addr + size, fd);
         assert(ret == 0);
       }
       break;
@@ -606,7 +615,9 @@ void notify_vm_op(vm_op_t op, uintptr_t addr, size_t size, int prot, int flags, 
 #endif
 }
 
-void main(int argc, char **argv, char **envp) {
+extern void register_mapping(uint64_t begin, uint64_t size, int64_t prot_flags, int64_t map_flags, int fd, off_t offset);
+
+void dbm_main(int argc, char **argv, char **envp) {
   Elf *elf = NULL;
   
   if (argc < 2) {
@@ -636,12 +647,14 @@ void main(int argc, char **argv, char **envp) {
   struct elf_loader_auxv auxv;
   uintptr_t entry_address;
   load_elf(argv[1], &elf, &auxv, &entry_address, false);
-  debug("entry address: 0x%x\n", entry_address);
+  debug("entry address: 0x%" PRIxPTR "\n", entry_address);
 
   // Set up brk emulation
   ret = pthread_mutex_init(&global_data.brk_mutex, NULL);
   assert(ret == 0);
   void *map = mmap((void *)global_data.brk, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+  register_mapping((uint64_t)map, PAGE_SIZE, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
   assert(map != MAP_FAILED);
   global_data.initial_brk = global_data.brk = (uintptr_t)map;
@@ -658,7 +671,7 @@ void main(int argc, char **argv, char **envp) {
   register_thread(thread_data, false);
 
   uintptr_t block_address = scan(thread_data, (uint16_t *)entry_address, ALLOCATE_BB);
-  debug("Address of first basic block is: 0x%x\n", block_address);
+  debug("Address of first basic block is: 0x%" PRIxPTR "\n", block_address);
 
   #define ARGDIFF 2
   elf_run(block_address, argv[1], argc-ARGDIFF, &argv[ARGDIFF], envp, &auxv);

@@ -2,7 +2,7 @@
   This file is part of MAMBO, a low-overhead dynamic binary modification tool:
       https://github.com/beehive-lab/mambo
 
-  Copyright 2017-2019 The University of Manchester
+  Copyright 2017-2020 The University of Manchester
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -148,26 +148,26 @@ int get_backtrace(stack_frame_t *fp, stack_frame_handler handler, void *data) {
 }
 
 void function_watch_lock_funcs(watched_functions_t *self) {
-  int ret = pthread_mutex_lock(&self->funcs_lock);
+  int ret __attribute__((unused)) = pthread_mutex_lock(&self->funcs_lock);
   assert(ret == 0);
 }
 
 void function_watch_lock_funcps(watched_functions_t *self) {
-  int ret = pthread_mutex_lock(&self->funcps_lock);
+  int ret __attribute__((unused)) = pthread_mutex_lock(&self->funcps_lock);
   assert(ret == 0);
 }
 
 void function_watch_unlock_funcs(watched_functions_t *self) {
-  int ret = pthread_mutex_unlock(&self->funcs_lock);
+  int ret __attribute__((unused)) = pthread_mutex_unlock(&self->funcs_lock);
   assert(ret == 0);
 }
 
 void function_watch_unlock_funcps(watched_functions_t *self) {
-  int ret = pthread_mutex_unlock(&self->funcps_lock);
+  int ret __attribute__((unused)) = pthread_mutex_unlock(&self->funcps_lock);
   assert(ret == 0);
 }
 
-int function_watch_init(watched_functions_t *self) {
+void function_watch_init(watched_functions_t *self) {
   int ret = pthread_mutex_init(&self->funcs_lock, NULL);
   assert(ret == 0);
   ret = pthread_mutex_init(&self->funcps_lock, NULL);
@@ -232,12 +232,13 @@ ret:
   return err;
 }
 
-int function_watch_try_addp(watched_functions_t *self, char *name, void *addr) {
+void function_watch_try_addp(watched_functions_t *self, char *name, void *addr) {
   function_watch_lock_funcs(self);
 
   for (int i = 0; i < self->func_count; i++) {
     if (strcmp(name, self->funcs[i].name) == 0) {
-      function_watch_addp(self, &self->funcs[i], addr);
+      int ret __attribute__((unused)) = function_watch_addp(self, &self->funcs[i], addr);
+      assert(ret == 0);
     }
   }
 
@@ -268,15 +269,23 @@ int function_watch_delete_addp(watched_functions_t *self, int i) {
 }
 
 int function_watch_addp_invalidate(watched_functions_t *self, void *addr, size_t size) {
+  int ret = -1;
+
   function_watch_lock_funcps(self);
 
   for (int i = 0; i < self->funcp_count; i++) {
     if (self->funcps[i].addr >= addr && self->funcps[i].addr < (addr + size)) {
-      function_watch_delete_addp(self, i);
+      ret = function_watch_delete_addp(self, i);
+      assert(ret == 0);
     }
   }
+
   function_watch_unlock_funcps(self);
+
+  return ret;
 }
+
+extern void remap_static_elf(uint64_t addr);
 
 int function_watch_parse_elf(watched_functions_t *self, Elf *elf, void *base_addr) {
   Elf_Scn *scn = NULL;
@@ -287,7 +296,9 @@ int function_watch_parse_elf(watched_functions_t *self, Elf *elf, void *base_add
     printf("Error reading the ELF executable header: %s\n", elf_errmsg(-1));
     return -1;
   }
+
   if (ehdr->e_type == ET_EXEC) {
+    remap_static_elf((uint64_t)base_addr);
     base_addr = NULL;
   }
 
@@ -297,13 +308,15 @@ int function_watch_parse_elf(watched_functions_t *self, Elf *elf, void *base_add
       Elf_Data *edata = elf_getdata(scn, NULL);
       assert(edata != NULL);
       int sym_count = shdr.sh_size / shdr.sh_entsize;
-
       for (int i = 0; i < sym_count; i++) {
         gelf_getsym(edata, i, &sym);
         if (sym.st_value != 0 && ELF32_ST_TYPE(sym.st_info) == STT_FUNC) {
           char *sym_name = elf_strptr(elf, shdr.sh_link, sym.st_name);
           assert(sym_name != NULL);
           function_watch_try_addp(self, sym_name, base_addr + sym.st_value);
+
+          extern void memtracer_register_func(const char* name, void* addr);
+          memtracer_register_func(sym_name, base_addr + sym.st_value);
         }
       }
     } // shdr.sh_type == SHT_SYMTAB

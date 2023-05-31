@@ -3,6 +3,7 @@
       https://github.com/beehive-lab/mambo
 
   Copyright 2013-2016 Cosmin Gorgovan <cosmin at linux-geek dot org>
+  Copyright 2017-2020 The University of Manchester
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -38,6 +39,7 @@ void emit_counter64_incr(mambo_context *ctx, void *counter, unsigned incr);
 void emit_push(mambo_context *ctx, uint32_t regs);
 void emit_pop(mambo_context *ctx, uint32_t regs);
 void emit_set_reg(mambo_context *ctx, enum reg reg, uintptr_t value);
+void emit_set_reg_ptr(mambo_context *ctx, enum reg reg, void *ptr);
 void emit_fcall(mambo_context *ctx, void *function_ptr);
 int emit_safe_fcall(mambo_context *ctx, void *function_ptr, int argno);
 int emit_safe_fcall_static_args(mambo_context *ctx, void *fptr, int argno, ...);
@@ -65,10 +67,6 @@ int emit_local_fcall(mambo_context *ctx, mambo_branch *br);
 int emit_local_branch_cbz_cbnz(mambo_context *ctx, mambo_branch *br, enum reg reg, bool is_cbz);
 int emit_local_branch_cbz(mambo_context *ctx, mambo_branch *br, enum reg reg);
 int emit_local_branch_cbnz(mambo_context *ctx, mambo_branch *br, enum reg reg);
-
-static inline void emit_set_reg_ptr(mambo_context *ctx, enum reg reg, void *ptr) {
-  emit_set_reg(ctx, reg, (uintptr_t)ptr);
-}
 
 #ifdef __arm__
 #define ROR 3
@@ -101,5 +99,20 @@ static inline int emit_a64_add_sub_shift(mambo_context *ctx, int rd, int rn, int
 static inline int emit_a64_add_sub(mambo_context *ctx, int rd, int rn, int rm);
 int emit_a64_add_sub_ext(mambo_context *ctx, int rd, int rn, int rm, int ext_option, int shift);
 #endif
+
+void emit_store_pair(mambo_context* ctx, int first, int second, int addr);
+void emit_load_pair(mambo_context* ctx, int first, int second, int addr);
+void emit_str(mambo_context* ctx, int reg, int addr);
+void emit_ldr(mambo_context* ctx, int reg, int addr);
+
+void emit_str_imm_unsigned_offset(mambo_context* ctx, int rt, int rn, int offset);
+void emit_ldr_imm_unsigned_offset(mambo_context* ctx, int rt, int rn, int offset);
+void emit_stp_imm_signed(mambo_context* ctx, int rt, int rt2, int rn, int offset);
+void emit_ldp_imm_signed(mambo_context* ctx, int rt, int rt2, int rn, int offset);
+void emit_and(mambo_context* ctx, int rd, int rn, int rm);
+void emit_and_imm(mambo_context* ctx, int rd, int rn, uint32_t imm);
+void emit_tbz(mambo_context* ctx, int rt, int bit, int offset);
+void patch_tbz(void* pc, int rt, int bit, int offset);
+void* reserve_inst(mambo_context* ctx);
 
 #endif

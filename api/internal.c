@@ -3,7 +3,7 @@
       https://github.com/beehive-lab/mambo
 
   Copyright 2013-2016 Cosmin Gorgovan <cosmin at linux-geek dot org>
-  Copyright 2017-2019 The University of Manchester
+  Copyright 2017-2020 The University of Manchester
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -104,8 +104,15 @@ void _function_callback_wrapper(mambo_context *ctx, watched_func_t *func) {
   ctx->code.available_regs = ctx->code.pushed_regs;
   ctx->code.func_name = func->name;
 
+  void* stack_ptr = &ctx->thread_data->link_stack;
   if (func->post_callback != NULL) {
-    emit_push(ctx, (1 << es) | (1 << lr));
+    // emit_push(ctx, (1 << es) | (1 << lr));
+    emit_push(ctx, m_x0 | m_x1);
+    emit_set_reg_ptr(ctx, x1, stack_ptr);
+    emit_ldr(ctx, x0, x1);
+    emit_store_pair(ctx, es, lr, x0);
+    emit_str(ctx, x0, x1);
+    emit_pop(ctx, m_x0 | m_x1);
   }
   if (func->pre_callback != NULL) {
     ctx->event_type = PRE_FN_C;
@@ -130,7 +137,14 @@ void _function_callback_wrapper(mambo_context *ctx, watched_func_t *func) {
     ctx->event_type = POST_FN_C;
     func->post_callback(ctx);
 
-    emit_pop(ctx, (1 << es) | (1 << lr));
+    // emit_pop(ctx, (1 << es) | (1 << lr));
+    emit_push(ctx, m_x0 | m_x1);
+    emit_set_reg_ptr(ctx, x1, stack_ptr);
+    emit_ldr(ctx, x0, x1);
+    emit_load_pair(ctx, es, lr, x0);
+    emit_str(ctx, x0, x1);
+    emit_pop(ctx, m_x0 | m_x1);
+
     // IHL(LR) - emulated return to the caller of malloc()
     emit_indirect_branch_by_spc(ctx, lr);
     emit_local_fcall(ctx, &fcall);
