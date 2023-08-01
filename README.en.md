@@ -2,6 +2,7 @@
 
 #### Description
 A low-overhead dynamic binary instrumentation and modification tool for ARM (both AArch32 and AArch64 support) and RISC-V (RV64GC).
+This project is derived from mambo (https://github.com/beehive-lab/mambo)
 
 #### Software Architecture
 Software architecture description
